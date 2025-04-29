@@ -1,67 +1,70 @@
 package main
 
 import (
-    "encoding/json"
-    "log"
-    "net/url"
-    "os"
-    "os/signal"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
 
-    "github.com/gorilla/websocket"
+	"github.com/gorilla/websocket"
 )
 
 type Sample struct {
-    Timestamp uint32 `json:"timestamp"`
-    Value     uint32 `json:"value"`
+	Channel   int    `json:"channel"`
+	Timestamp uint32 `json:"timestamp"`
+	Value     uint32 `json:"value"`
+}
+
+func streamSamples(wsURL string) (<-chan Sample, <-chan error) {
+	samples := make(chan Sample)
+	errs := make(chan error, 1)
+
+	go func() {
+		defer close(samples)
+		defer close(errs)
+
+		conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+		if err != nil {
+			errs <- err
+			return
+		}
+		defer conn.Close()
+
+		for {
+			_, msg, err := conn.ReadMessage()
+			if err != nil {
+				errs <- err
+				return
+			}
+			var s Sample
+			if err := json.Unmarshal(msg, &s); err != nil {
+				log.Printf("JSON unmarshal error: %v", err)
+				continue
+			}
+			samples <- s
+		}
+	}()
+
+	return samples, errs
 }
 
 func main() {
-    // connect to ESP32 WebSocket endpoint (you’d add this to your firmware)
-    u := url.URL{Scheme: "ws", Host: "192.168.1.66", Path: "/ws/channel/0"}
-    conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
-    if err != nil {
-        log.Fatal("dial:", err)
-    }
-    defer conn.Close()
+	host := flag.String("host", "192.168.1.66", "ESP32 WebSocket server host")
+	port := flag.Int("port", 81, "WebSocket server port")
+	flag.Parse()
 
-    // channel for incoming samples
-    samples := make(chan Sample)
+	wsURL := fmt.Sprintf("ws://%s:%d", *host, *port)
+	samples, errs := streamSamples(wsURL)
 
-    // reader goroutine
-    go func() {
-        defer close(samples)
-        for {
-            _, msg, err := conn.ReadMessage()
-            if err != nil {
-                log.Println("read:", err)
-                return
-            }
-            var s Sample
-            if err := json.Unmarshal(msg, &s); err != nil {
-                log.Println("unmarshal:", err)
-                continue
-            }
-            samples <- s
-        }
-    }()
-
-    // signal handling for clean shutdown
-    interrupt := make(chan os.Signal, 1)
-    signal.Notify(interrupt, os.Interrupt)
-
-    // consume samples
-    for {
-        select {
-        case s, ok := <-samples:
-            if !ok {
-                log.Println("stream closed")
-                return
-            }
-            log.Printf("got sample: %#v\n", s)
-        case <-interrupt:
-            log.Println("interrupt, closing")
-            conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-            return
-        }
-    }
+	for {
+		select {
+		case s, ok := <-samples:
+			if !ok {
+				return
+			}
+			log.Printf("Channel %d – Timestamp: %d, Value: %d", s.Channel, s.Timestamp, s.Value)
+		case err := <-errs:
+			log.Fatalf("stream error: %v", err)
+		}
+	}
 }
