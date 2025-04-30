@@ -62,7 +62,7 @@ func main() {
 			if !ok {
 				return
 			}
-			log.Printf("Channel %d – Timestamp: %d, Value: %d", s.Channel, s.Timestamp, s.Value)
+			fmt.Printf("%d, %d, %d\n", s.Channel, s.Timestamp, s.Value)
 		case err := <-errs:
 			log.Fatalf("stream error: %v", err)
 		}
