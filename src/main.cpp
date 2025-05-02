@@ -17,24 +17,28 @@ WebSocketsServer ws(81);
 WiFiServer mqttTcpServer(1883);
 // MQTT WebSocket server on port 82
 WiFiServer mqttWebsocketServerUnderlying(82);
-PicoWebsocket::Server<WiFiServer>
-    mqttWebsocketServer(mqttWebsocketServerUnderlying);
+PicoWebsocket::Server<WiFiServer> mqttWebsocketServer(mqttWebsocketServerUnderlying);
 
 // Subclass PicoMQTT::Server to get virtual hooks
-class DebugMQTTServer : public PicoMQTT::Server {
+class DebugMQTTServer : public PicoMQTT::Server
+{
 public:
   DebugMQTTServer(WiFiServer &tcp, PicoWebsocket::Server<WiFiServer> &ws)
       : PicoMQTT::Server(tcp, ws) {}
-  void on_connected(const char *client_id) override {
+  void on_connected(const char *client_id) override
+  {
     Serial.printf("MQTT CONNECT clientId=%s\n", client_id);
   }
-  void on_disconnected(const char *client_id) override {
+  void on_disconnected(const char *client_id) override
+  {
     Serial.printf("MQTT DISCONNECT clientId=%s\n", client_id);
   }
-  void on_subscribe(const char *client_id, const char *topic) override {
+  void on_subscribe(const char *client_id, const char *topic) override
+  {
     Serial.printf("MQTT SUBSCRIBE clientId=%s topic=%s\n", client_id, topic);
   }
-  void on_unsubscribe(const char *client_id, const char *topic) override {
+  void on_unsubscribe(const char *client_id, const char *topic) override
+  {
     Serial.printf("MQTT UNSUBSCRIBE clientId=%s topic=%s\n", client_id, topic);
   }
 };
@@ -44,7 +48,11 @@ DebugMQTTServer mqtt(mqttTcpServer, mqttWebsocketServer);
 
 // Preferences (NVS) for WiFi and channels
 Preferences prefs;
-enum { MODE_STA = 0, MODE_AP = 1 };
+enum
+{
+  MODE_STA = 0,
+  MODE_AP = 1
+};
 const char *PREF_NAMESPACE = "wifi";
 const char *KEY_MODE = "mode";
 const char *KEY_SSID = "ssid";
@@ -59,12 +67,14 @@ const char *DEFAULT_AP_PASS = "config123";
 #define MAX_BUFFER_SIZE 100
 const uint8_t adcPins[MAX_CHANNELS] = {34, 35, 32, 33};
 
-struct Sample {
+struct Sample
+{
   uint32_t timestamp;
   float value;
 };
 
-struct Channel {
+struct Channel
+{
   bool configured = false;
   bool samplingEnabled = false;
   uint32_t samplingInterval = 1000; // ms
@@ -77,6 +87,10 @@ struct Channel {
   float offset = 0.0f;
   float factor = 1.0f;
   float divisor = 1.0f;
+  // filter (multisampling)
+  uint16_t filterLength = 1;                    // number of samples to average
+  uint16_t filterIndex = 0;                     // current index
+  uint32_t filterBuffer[MAX_BUFFER_SIZE] = {0}; // raw values
   bool overflow = false;
   Sample buffer[MAX_BUFFER_SIZE];
 };
@@ -87,22 +101,30 @@ Channel channels[MAX_CHANNELS];
 
 // --- Persisted Channel Config ---
 // Load channel configs from NVS
-void loadChannelConfigs() {
+// Load per-channel configuration from NVS
+void loadChannelConfigs()
+{
   prefs.begin(PREF_NAMESPACE, true);
-  for (int i = 0; i < MAX_CHANNELS; i++) {
+  for (int i = 0; i < MAX_CHANNELS; i++)
+  {
     String keyCfg = CH_KEY(i, "cfg");
     if (!prefs.getBool(keyCfg.c_str(), false))
       continue;
     Channel &C = channels[i];
     C.configured = true;
-    C.samplingEnabled =
-        prefs.getBool(CH_KEY(i, "enabled").c_str(), C.samplingEnabled);
-    C.samplingInterval =
-        prefs.getUInt(CH_KEY(i, "interval").c_str(), C.samplingInterval);
+    C.samplingEnabled = prefs.getBool(CH_KEY(i, "enabled").c_str(), C.samplingEnabled);
+    C.samplingInterval = prefs.getUInt(CH_KEY(i, "interval").c_str(), C.samplingInterval);
     C.bufferSize = prefs.getUInt(CH_KEY(i, "bufsize").c_str(), C.bufferSize);
-    prefs.getBytes(CH_KEY(i, "offset").c_str(), &C.offset, sizeof(C.offset));
-    prefs.getBytes(CH_KEY(i, "factor").c_str(), &C.factor, sizeof(C.factor));
-    prefs.getBytes(CH_KEY(i, "divisor").c_str(), &C.divisor, sizeof(C.divisor));
+    C.offset = prefs.getFloat(CH_KEY(i, "offset").c_str(), C.offset);
+    C.factor = prefs.getFloat(CH_KEY(i, "factor").c_str(), C.factor);
+    C.divisor = prefs.getFloat(CH_KEY(i, "divisor").c_str(), C.divisor);
+    // load filter length
+    C.filterLength = prefs.getUInt(CH_KEY(i, "filterLength").c_str(), C.filterLength);
+    // reset filter index
+    C.filterIndex = 0;
+    // clear filter buffer
+    for (uint16_t j = 0; j < C.filterLength; j++)
+      C.filterBuffer[j] = 0;
     C.head = C.tail = C.count = 0;
     C.overflow = false;
     C.lastSampleTime = millis();
@@ -111,27 +133,34 @@ void loadChannelConfigs() {
 }
 
 // --- WiFi setup ---
-void setupWiFi() {
+void setupWiFi()
+{
   prefs.begin(PREF_NAMESPACE, false);
   uint8_t mode = prefs.getUInt(KEY_MODE, MODE_AP);
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(DEFAULT_AP_SSID, DEFAULT_AP_PASS);
   Serial.printf("AP up: SSID=%s, IP=%s\n", DEFAULT_AP_SSID,
                 WiFi.softAPIP().toString().c_str());
-  if (mode == MODE_STA) {
+  if (mode == MODE_STA)
+  {
     String ss = prefs.getString(KEY_SSID, "");
     String pw = prefs.getString(KEY_PASS, "");
-    if (ss.length()) {
+    if (ss.length())
+    {
       WiFi.begin(ss.c_str(), pw.c_str());
       Serial.printf("Joining STA '%s'… ", ss.c_str());
       unsigned long t0 = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
+      while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000)
+      {
         delay(500);
         Serial.print('.');
       }
-      if (WiFi.status() == WL_CONNECTED) {
+      if (WiFi.status() == WL_CONNECTED)
+      {
         Serial.printf("\nSTA IP: %s\n", WiFi.localIP().toString().c_str());
-      } else {
+      }
+      else
+      {
         Serial.println("\nFailed to join STA, staying AP only");
       }
     }
@@ -140,14 +169,16 @@ void setupWiFi() {
 }
 
 // --- HTTP handlers for WiFi config ---
-void handleGetWiFi() {
+void handleGetWiFi()
+{
   StaticJsonDocument<256> doc;
   prefs.begin(PREF_NAMESPACE, true);
   uint8_t mode = prefs.getUInt(KEY_MODE, MODE_AP);
   doc["mode"] = (mode == MODE_STA ? "sta" : "ap");
   if (mode == MODE_STA)
     doc["ssid"] = prefs.getString(KEY_SSID, "");
-  else {
+  else
+  {
     doc["ap_ssid"] = DEFAULT_AP_SSID;
     doc["ap_pass"] = DEFAULT_AP_PASS;
   }
@@ -157,25 +188,28 @@ void handleGetWiFi() {
   server.send(200, "application/json", out);
 }
 
-void handleSetWiFi() {
+void handleSetWiFi()
+{
   StaticJsonDocument<256> doc;
-  if (deserializeJson(doc, server.arg("plain"))) {
+  if (deserializeJson(doc, server.arg("plain")))
+  {
     server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
     return;
   }
   const char *m = doc["mode"];
-  if (!m || (strcmp(m, "sta") && strcmp(m, "ap"))) {
-    server.send(400, "application/json",
-                "{\"error\":\"mode must be 'sta' or 'ap'\"}");
+  if (!m || (strcmp(m, "sta") && strcmp(m, "ap")))
+  {
+    server.send(400, "application/json", "{\"error\":\"mode must be 'sta' or 'ap'\"}");
     return;
   }
   prefs.begin(PREF_NAMESPACE, false);
   prefs.putUInt(KEY_MODE, strcmp(m, "sta") == 0 ? MODE_STA : MODE_AP);
-  if (strcmp(m, "sta") == 0) {
+  if (strcmp(m, "sta") == 0)
+  {
     const char *ss = doc["ssid"], *pw = doc["pass"];
-    if (!ss || !pw) {
-      server.send(400, "application/json",
-                  "{\"error\":\"sta requires ssid & pass\"}");
+    if (!ss || !pw)
+    {
+      server.send(400, "application/json", "{\"error\":\"sta requires ssid & pass\"}");
       prefs.end();
       return;
     }
@@ -189,7 +223,8 @@ void handleSetWiFi() {
 }
 
 // --- Utility to extract channel number ---
-bool extractChannel(const String &uri, int &ch) {
+bool extractChannel(const String &uri, int &ch)
+{
   int start = uri.indexOf("/channel/") + 9;
   int end = uri.indexOf('/', start);
   String s = (end < 0 ? uri.substring(start) : uri.substring(start, end));
@@ -198,12 +233,13 @@ bool extractChannel(const String &uri, int &ch) {
 }
 
 // --- HTTP handlers for channel config/data ---
-void handleGetConfig() {
+void handleGetConfig()
+{
   int ch;
   String uri = server.uri();
-  if (!extractChannel(uri, ch) || !channels[ch].configured) {
-    server.send(404, "application/json",
-                "{\"error\":\"Channel not configured\"}");
+  if (!extractChannel(uri, ch) || !channels[ch].configured)
+  {
+    server.send(404, "application/json", "{\"error\":\"Channel not configured\"}");
     return;
   }
   Channel &C = channels[ch];
@@ -214,15 +250,18 @@ void handleGetConfig() {
   doc["offset"] = C.offset;
   doc["factor"] = C.factor;
   doc["divisor"] = C.divisor;
+  doc["filterLength"] = C.filterLength;
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
 }
 
-void handleSetConfig() {
+void handleSetConfig()
+{
   int ch;
   String uri = server.uri();
-  if (!extractChannel(uri, ch)) {
+  if (!extractChannel(uri, ch))
+  {
     server.send(400, "application/json", "{\"error\":\"Invalid channel\"}");
     return;
   }
@@ -234,9 +273,9 @@ void handleSetConfig() {
   float offset = doc["offset"].as<float>();
   float factor = doc["factor"].as<float>();
   float divisor = doc["divisor"].as<float>();
-  if (bufSize == 0 || bufSize > MAX_BUFFER_SIZE) {
-    server.send(400, "application/json",
-                "{\"error\":\"bufferSize out of range\"}");
+  if (bufSize == 0 || bufSize > MAX_BUFFER_SIZE)
+  {
+    server.send(400, "application/json", "{\"error\":\"bufferSize out of range\"}");
     return;
   }
   Channel &C = channels[ch];
@@ -247,6 +286,18 @@ void handleSetConfig() {
   C.offset = offset;
   C.factor = factor;
   C.divisor = divisor;
+  // configure multisampling filter
+  uint16_t filterLen = doc["filterLength"].as<uint16_t>();
+  if (filterLen == 0 || filterLen > MAX_BUFFER_SIZE)
+  {
+    server.send(400, "application/json", "{\"error\":\"filterLength out of range\"}");
+    return;
+  }
+  C.filterLength = filterLen;
+  C.filterIndex = 0;
+  // clear buffer
+  for (uint16_t j = 0; j < C.filterLength; j++)
+    C.filterBuffer[j] = 0;
   C.head = C.tail = C.count = 0;
   C.overflow = false;
   C.lastSampleTime = millis();
@@ -256,9 +307,17 @@ void handleSetConfig() {
   prefs.putBool(CH_KEY(ch, "enabled").c_str(), enabled);
   prefs.putUInt(CH_KEY(ch, "interval").c_str(), intervalMs);
   prefs.putUInt(CH_KEY(ch, "bufsize").c_str(), bufSize);
-  prefs.putBytes(CH_KEY(ch, "offset").c_str(), &offset, sizeof(offset));
-  prefs.putBytes(CH_KEY(ch, "factor").c_str(), &factor, sizeof(factor));
-  prefs.putBytes(CH_KEY(ch, "divisor").c_str(), &divisor, sizeof(divisor));
+  // persist channel config
+  prefs.begin(PREF_NAMESPACE, false);
+  prefs.putBool(CH_KEY(ch, "cfg").c_str(), true);
+  prefs.putBool(CH_KEY(ch, "enabled").c_str(), enabled);
+  prefs.putUInt(CH_KEY(ch, "interval").c_str(), intervalMs);
+  prefs.putUInt(CH_KEY(ch, "bufsize").c_str(), bufSize);
+  // use putFloat for calibration floats
+  prefs.putFloat(CH_KEY(ch, "offset").c_str(), offset);
+  prefs.putFloat(CH_KEY(ch, "factor").c_str(), factor);
+  prefs.putFloat(CH_KEY(ch, "divisor").c_str(), divisor);
+  prefs.putUInt(CH_KEY(ch, "filterLength").c_str(), filterLen);
   prefs.end();
   server.send(200, "application/json", "{\"status\":\"OK\"}");
 }
@@ -267,12 +326,14 @@ void handleSetConfig() {
 void handleGetData() { /* unchanged HTTP data handler */ }
 
 // --- WebSocket handlers ---
-void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t *, size_t) {
+void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t *, size_t)
+{
   if (type == WStype_CONNECTED)
     ws.sendTXT(num, "{\"msg\":\"WebSocket connected\"}");
 }
 
-void broadcastSample(uint8_t channel, const Sample &s) {
+void broadcastSample(uint8_t channel, const Sample &s)
+{
   StaticJsonDocument<128> d;
   d["channel"] = channel;
   d["timestamp"] = s.timestamp;
@@ -282,13 +343,15 @@ void broadcastSample(uint8_t channel, const Sample &s) {
   ws.broadcastTXT(o);
 }
 
-void setup() {
+void setup()
+{
   Serial.begin(115200);
   setupWiFi();
   loadChannelConfigs();
   server.on("/wifi", HTTP_GET, handleGetWiFi);
   server.on("/wifi", HTTP_POST, handleSetWiFi);
-  for (int i = 0; i < MAX_CHANNELS; i++) {
+  for (int i = 0; i < MAX_CHANNELS; i++)
+  {
     String cfg = "/channel/" + String(i) + "/config";
     String dat = "/channel/" + String(i);
     server.on(cfg, HTTP_GET, handleGetConfig);
@@ -302,23 +365,33 @@ void setup() {
   Serial.println("Servers started");
 }
 
-void loop() {
+void loop()
+{
   uint32_t now = millis();
   ws.loop();
-  for (int i = 0; i < MAX_CHANNELS; i++) {
+  for (int i = 0; i < MAX_CHANNELS; i++)
+  {
     auto &C = channels[i];
     if (!C.configured || !C.samplingEnabled)
       continue;
     if (now - C.lastSampleTime < C.samplingInterval)
       continue;
-    uint32_t raw = analogRead(adcPins[i]);
+    // take raw reading and apply multisampling filter
+    uint32_t rawSample = analogRead(adcPins[i]);
+    C.filterBuffer[C.filterIndex] = rawSample;
+    C.filterIndex = (C.filterIndex + 1) % C.filterLength;
+    uint32_t sum = 0;
+    for (uint16_t j = 0; j < C.filterLength; j++)
+      sum += C.filterBuffer[j];
+    uint32_t raw = sum / C.filterLength;
     float sv = raw / 4096.0f * 3.3f;
     float cv = sv - C.offset;
     float m = cv * C.factor / C.divisor;
     Sample s{now, m};
     if (C.count < C.bufferSize)
       C.count++;
-    else {
+    else
+    {
       C.overflow = true;
       C.tail = (C.tail + 1) % C.bufferSize;
     }
