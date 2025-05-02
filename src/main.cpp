@@ -39,7 +39,7 @@ public:
   }
 };
 
-// PicoMQTT server instance
+// MQTT broker instance
 DebugMQTTServer mqtt(mqttTcpServer, mqttWebsocketServer);
 
 // Preferences (NVS) for WiFi and channels
@@ -74,7 +74,7 @@ struct Channel {
   uint16_t tail = 0;
   uint16_t count = 0;
   // calibration parameters
-  float offset = 0.0f; // volts
+  float offset = 0.0f;
   float factor = 1.0f;
   float divisor = 1.0f;
   bool overflow = false;
@@ -85,12 +85,13 @@ Channel channels[MAX_CHANNELS];
 // NVS key helper: CH_KEY(channel, name)
 #define CH_KEY(ch, name) (String("ch") + ch + "_" + name)
 
-// Load per-channel configuration from NVS
+// --- Persisted Channel Config ---
+// Load channel configs from NVS
 void loadChannelConfigs() {
-  prefs.begin(PREF_NAMESPACE, false);
+  prefs.begin(PREF_NAMESPACE, true);
   for (int i = 0; i < MAX_CHANNELS; i++) {
-    String kCfg = CH_KEY(i, "cfg");
-    if (!prefs.getBool(kCfg.c_str(), false))
+    String keyCfg = CH_KEY(i, "cfg");
+    if (!prefs.getBool(keyCfg.c_str(), false))
       continue;
     Channel &C = channels[i];
     C.configured = true;
@@ -99,13 +100,14 @@ void loadChannelConfigs() {
     C.samplingInterval =
         prefs.getUInt(CH_KEY(i, "interval").c_str(), C.samplingInterval);
     C.bufferSize = prefs.getUInt(CH_KEY(i, "bufsize").c_str(), C.bufferSize);
-    C.offset = prefs.getFloat(CH_KEY(i, "offset").c_str(), C.offset);
-    C.factor = prefs.getFloat(CH_KEY(i, "factor").c_str(), C.factor);
-    C.divisor = prefs.getFloat(CH_KEY(i, "divisor").c_str(), C.divisor);
+    prefs.getBytes(CH_KEY(i, "offset").c_str(), &C.offset, sizeof(C.offset));
+    prefs.getBytes(CH_KEY(i, "factor").c_str(), &C.factor, sizeof(C.factor));
+    prefs.getBytes(CH_KEY(i, "divisor").c_str(), &C.divisor, sizeof(C.divisor));
     C.head = C.tail = C.count = 0;
     C.overflow = false;
     C.lastSampleTime = millis();
   }
+  prefs.end();
 }
 
 // --- WiFi setup ---
@@ -134,11 +136,13 @@ void setupWiFi() {
       }
     }
   }
+  prefs.end();
 }
 
 // --- HTTP handlers for WiFi config ---
 void handleGetWiFi() {
   StaticJsonDocument<256> doc;
+  prefs.begin(PREF_NAMESPACE, true);
   uint8_t mode = prefs.getUInt(KEY_MODE, MODE_AP);
   doc["mode"] = (mode == MODE_STA ? "sta" : "ap");
   if (mode == MODE_STA)
@@ -147,6 +151,7 @@ void handleGetWiFi() {
     doc["ap_ssid"] = DEFAULT_AP_SSID;
     doc["ap_pass"] = DEFAULT_AP_PASS;
   }
+  prefs.end();
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
@@ -164,17 +169,20 @@ void handleSetWiFi() {
                 "{\"error\":\"mode must be 'sta' or 'ap'\"}");
     return;
   }
+  prefs.begin(PREF_NAMESPACE, false);
   prefs.putUInt(KEY_MODE, strcmp(m, "sta") == 0 ? MODE_STA : MODE_AP);
   if (strcmp(m, "sta") == 0) {
     const char *ss = doc["ssid"], *pw = doc["pass"];
     if (!ss || !pw) {
       server.send(400, "application/json",
                   "{\"error\":\"sta requires ssid & pass\"}");
+      prefs.end();
       return;
     }
     prefs.putString(KEY_SSID, ss);
     prefs.putString(KEY_PASS, pw);
   }
+  prefs.end();
   server.send(200, "application/json", "{\"status\":\"OK, restarting\"}");
   delay(500);
   ESP.restart();
@@ -198,7 +206,7 @@ void handleGetConfig() {
                 "{\"error\":\"Channel not configured\"}");
     return;
   }
-  auto &C = channels[ch];
+  Channel &C = channels[ch];
   StaticJsonDocument<256> doc;
   doc["samplingInterval"] = C.samplingInterval / 1000;
   doc["bufferSize"] = C.bufferSize;
@@ -232,28 +240,30 @@ void handleSetConfig() {
     return;
   }
   Channel &C = channels[ch];
-  C.configured = C.samplingEnabled = true;
+  C.configured = true;
+  C.samplingEnabled = enabled;
   C.samplingInterval = intervalMs;
   C.bufferSize = bufSize;
-  C.samplingEnabled = enabled;
   C.offset = offset;
   C.factor = factor;
   C.divisor = divisor;
   C.head = C.tail = C.count = 0;
   C.overflow = false;
   C.lastSampleTime = millis();
-  // persist
+  // persist channel config
   prefs.begin(PREF_NAMESPACE, false);
   prefs.putBool(CH_KEY(ch, "cfg").c_str(), true);
   prefs.putBool(CH_KEY(ch, "enabled").c_str(), enabled);
   prefs.putUInt(CH_KEY(ch, "interval").c_str(), intervalMs);
   prefs.putUInt(CH_KEY(ch, "bufsize").c_str(), bufSize);
-  prefs.putFloat(CH_KEY(ch, "offset").c_str(), offset);
-  prefs.putFloat(CH_KEY(ch, "factor").c_str(), factor);
-  prefs.putFloat(CH_KEY(ch, "divisor").c_str(), divisor);
+  prefs.putBytes(CH_KEY(ch, "offset").c_str(), &offset, sizeof(offset));
+  prefs.putBytes(CH_KEY(ch, "factor").c_str(), &factor, sizeof(factor));
+  prefs.putBytes(CH_KEY(ch, "divisor").c_str(), &divisor, sizeof(divisor));
+  prefs.end();
   server.send(200, "application/json", "{\"status\":\"OK\"}");
 }
 
+// HTTP GET /channel/<n>
 void handleGetData() { /* unchanged HTTP data handler */ }
 
 // --- WebSocket handlers ---
@@ -289,7 +299,7 @@ void setup() {
   ws.begin();
   ws.onEvent(onWebSocketEvent);
   mqtt.begin();
-  Serial.println("HTTP+WS+MQTT started");
+  Serial.println("Servers started");
 }
 
 void loop() {
@@ -316,7 +326,7 @@ void loop() {
     broadcastSample(i, s);
     char buf[32];
     int len = snprintf(buf, sizeof(buf), "{%.4f}", m);
-    mqtt.publish((String("channel/") + i).c_str(), (uint8_t *)buf, len);
+    mqtt.publish((String("channel/") + i), (char *)buf, len);
     C.head = (C.head + 1) % C.bufferSize;
     C.lastSampleTime = now;
     Serial.printf("Sample ch %d -> %u, %.04f\n", i, s.timestamp, s.value);
