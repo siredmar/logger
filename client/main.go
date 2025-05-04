@@ -10,9 +10,9 @@ import (
 )
 
 type Sample struct {
-	Channel   int    `json:"channel"`
-	Timestamp uint32 `json:"timestamp"`
-	Value     uint32 `json:"value"`
+	Channel   int     `json:"channel"`
+	Timestamp uint32  `json:"timestamp"`
+	Value     float32 `json:"value"`
 }
 
 func streamSamples(wsURL string) (<-chan Sample, <-chan error) {
@@ -62,7 +62,7 @@ func main() {
 			if !ok {
 				return
 			}
-			fmt.Printf("%d, %d, %d\n", s.Channel, s.Timestamp, s.Value)
+			fmt.Printf("%d, %d, %f\n", s.Channel, s.Timestamp, s.Value)
 		case err := <-errs:
 			log.Fatalf("stream error: %v", err)
 		}

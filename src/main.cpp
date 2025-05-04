@@ -1,5 +1,4 @@
 // src/main.cpp
-#include "credentials.h"
 #include <ArduinoJson.h>
 #include <PicoMQTT.h>
 #include <PicoWebsocket.h>
@@ -62,9 +61,11 @@ const char *KEY_PASS = "pass";
 const char *DEFAULT_AP_SSID = "ESP32-AP";
 const char *DEFAULT_AP_PASS = "config123";
 
+#define MAX_BUFFER_SIZE 100
+
 // ADC & buffer parameters
 #define MAX_CHANNELS 4
-#define MAX_BUFFER_SIZE 100
+// Define the ADC pins for each channel
 const uint8_t adcPins[MAX_CHANNELS] = {34, 35, 32, 33};
 
 struct Sample
