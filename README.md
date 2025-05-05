@@ -10,6 +10,15 @@ Install PlatformIO in Visual Studio code, hit compile and upload.
 
 Upload via USB cable or use the OTA mechanism. For this the computer must be connected to the ESP somehow via Wifi (AP or STA mode).
 
+Add this for the OTA update mode in the platformio.ini
+
+```
+upload_protocol = espota
+upload_port = 192.168.1.66
+upload_flags =
+    --port=3232
+```
+
 ## Configuration
 
 ### Channel config
