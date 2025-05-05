@@ -6,6 +6,10 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
+#include <ArduinoOTA.h>
+
+// Internal temperature sensor (ROM function)
+extern "C" int temprature_sens_read();
 
 // HTTP server on port 80
 WebServer server(80);
@@ -56,6 +60,7 @@ const char *PREF_NAMESPACE = "wifi";
 const char *KEY_MODE = "mode";
 const char *KEY_SSID = "ssid";
 const char *KEY_PASS = "pass";
+const char *KEY_TEMP_ENABLED = "temp_en";
 
 // Default soft-AP credentials
 const char *DEFAULT_AP_SSID = "ESP32-AP";
@@ -97,6 +102,11 @@ struct Channel
 };
 Channel channels[MAX_CHANNELS];
 
+// Temp sensor config
+bool tempEnabled = false;
+const uint32_t TEMP_INTERVAL = 1000;
+uint32_t tempLastSample = 0;
+
 // NVS key helper: CH_KEY(channel, name)
 #define CH_KEY(ch, name) (String("ch") + ch + "_" + name)
 
@@ -120,7 +130,7 @@ void loadChannelConfigs()
     C.factor = prefs.getFloat(CH_KEY(i, "factor").c_str(), C.factor);
     C.divisor = prefs.getFloat(CH_KEY(i, "divisor").c_str(), C.divisor);
     // load filter length
-    C.filterLength = prefs.getUInt(CH_KEY(i, "filterLength").c_str(), C.filterLength);
+    C.filterLength = prefs.getUInt(CH_KEY(i, "fl").c_str(), C.filterLength);
     // reset filter index
     C.filterIndex = 0;
     // clear filter buffer
@@ -130,6 +140,7 @@ void loadChannelConfigs()
     C.overflow = false;
     C.lastSampleTime = millis();
   }
+  tempEnabled = prefs.getBool(KEY_TEMP_ENABLED, false);
   prefs.end();
 }
 
@@ -151,7 +162,7 @@ void setupWiFi()
       WiFi.begin(ss.c_str(), pw.c_str());
       Serial.printf("Joining STA '%s'… ", ss.c_str());
       unsigned long t0 = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000)
+      while (WiFi.status() != WL_CONNECTED && millis() - t0 < 20000)
       {
         delay(500);
         Serial.print('.');
@@ -162,11 +173,30 @@ void setupWiFi()
       }
       else
       {
-        Serial.println("\nFailed to join STA, staying AP only");
+        ESP.restart();
+        Serial.println("\nFailed to join STA. Restarting");
       }
     }
   }
   prefs.end();
+
+  // OTA setup
+  ArduinoOTA.setHostname("esp32-logger");
+  ArduinoOTA.onStart([]()
+                     { Serial.println("OTA Start"); });
+  ArduinoOTA.onEnd([]()
+                   { Serial.println("OTA End"); });
+  ArduinoOTA.onProgress([](unsigned int prog, unsigned int tot)
+                        { Serial.printf("OTA Progress: %u%%\r", (prog / (tot / 100))); });
+  ArduinoOTA.onError([](ota_error_t err)
+                     {
+      Serial.printf("OTA Error[%u]: ", err);
+      if (err == OTA_AUTH_ERROR)      Serial.println("Auth Failed");
+      else if (err == OTA_BEGIN_ERROR)Serial.println("Begin Failed");
+      else if (err == OTA_CONNECT_ERROR)Serial.println("Connect Failed");
+      else if (err == OTA_RECEIVE_ERROR)Serial.println("Receive Failed");
+      else if (err == OTA_END_ERROR)   Serial.println("End Failed"); });
+  ArduinoOTA.begin();
 }
 
 // --- HTTP handlers for WiFi config ---
@@ -251,7 +281,7 @@ void handleGetConfig()
   doc["offset"] = C.offset;
   doc["factor"] = C.factor;
   doc["divisor"] = C.divisor;
-  doc["filterLength"] = C.filterLength;
+  doc["fl"] = C.filterLength;
   String out;
   serializeJson(doc, out);
   server.send(200, "application/json", out);
@@ -288,7 +318,7 @@ void handleSetConfig()
   C.factor = factor;
   C.divisor = divisor;
   // configure multisampling filter
-  uint16_t filterLen = doc["filterLength"].as<uint16_t>();
+  uint16_t filterLen = doc["fl"].as<uint16_t>();
   if (filterLen == 0 || filterLen > MAX_BUFFER_SIZE)
   {
     server.send(400, "application/json", "{\"error\":\"filterLength out of range\"}");
@@ -318,13 +348,77 @@ void handleSetConfig()
   prefs.putFloat(CH_KEY(ch, "offset").c_str(), offset);
   prefs.putFloat(CH_KEY(ch, "factor").c_str(), factor);
   prefs.putFloat(CH_KEY(ch, "divisor").c_str(), divisor);
-  prefs.putUInt(CH_KEY(ch, "filterLength").c_str(), filterLen);
+  prefs.putUInt(CH_KEY(ch, "fl").c_str(), filterLen);
   prefs.end();
   server.send(200, "application/json", "{\"status\":\"OK\"}");
 }
 
-// HTTP GET /channel/<n>
-void handleGetData() { /* unchanged HTTP data handler */ }
+void handleGetData()
+{
+  int ch;
+  String uri = server.uri();
+  if (!extractChannel(uri, ch) || !channels[ch].configured)
+    return server.send(404, "application/json", "{\"error\":\"Channel not configured\"}");
+  auto &C = channels[ch];
+  StaticJsonDocument<1024> doc;
+  auto arr = doc.createNestedArray("data");
+  for (uint16_t i = 0; i < C.count; i++)
+  {
+    int idx = (C.tail + i) % C.bufferSize;
+    auto o = arr.createNestedObject();
+    o["timestamp"] = C.buffer[idx].timestamp;
+    o["value"] = C.buffer[idx].value;
+  }
+  doc["overflow"] = C.overflow;
+  C.tail = (C.tail + C.count) % C.bufferSize;
+  C.count = 0;
+  C.overflow = false;
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
+// Temp config handlers
+void handleGetTempConfig()
+{
+  StaticJsonDocument<64> doc;
+  prefs.begin(PREF_NAMESPACE, true);
+  doc["enabled"] = tempEnabled;
+  prefs.end();
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
+
+void handleSetTempConfig()
+{
+  StaticJsonDocument<64> doc;
+  if (deserializeJson(doc, server.arg("plain")))
+    return server.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+  tempEnabled = doc["enabled"].as<bool>();
+  prefs.begin(PREF_NAMESPACE, false);
+  prefs.putBool(KEY_TEMP_ENABLED, tempEnabled);
+  prefs.end();
+  server.send(200, "application/json", "{\"status\":\"OK\"}");
+}
+
+float getInternalTemperature()
+{
+  return (temprature_sens_read() - 32) / 1.8;
+}
+
+// Temp data handler
+void handleGetTemp()
+{
+  StaticJsonDocument<128> doc;
+  uint32_t ts = millis();
+  float t = getInternalTemperature();
+  doc["timestamp"] = ts;
+  doc["value"] = t;
+  String out;
+  serializeJson(doc, out);
+  server.send(200, "application/json", out);
+}
 
 // --- WebSocket handlers ---
 void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t *, size_t)
@@ -359,6 +453,9 @@ void setup()
     server.on(cfg, HTTP_POST, handleSetConfig);
     server.on(dat, HTTP_GET, handleGetData);
   }
+  server.on("/temp", HTTP_GET, handleGetTemp);
+  server.on("/temp/config", HTTP_GET, handleGetTempConfig);
+  server.on("/temp/config", HTTP_POST, handleSetTempConfig);
   server.begin();
   ws.begin();
   ws.onEvent(onWebSocketEvent);
@@ -368,6 +465,10 @@ void setup()
 
 void loop()
 {
+  ArduinoOTA.handle();
+  server.handleClient();
+  ws.loop();
+  mqtt.loop();
   uint32_t now = millis();
   ws.loop();
   for (int i = 0; i < MAX_CHANNELS; i++)
@@ -405,6 +506,15 @@ void loop()
     C.lastSampleTime = now;
     Serial.printf("Sample ch %d -> %u, %.04f\n", i, s.timestamp, s.value);
   }
-  server.handleClient();
-  mqtt.loop();
+  // sample temp
+  if (tempEnabled && now - tempLastSample >= TEMP_INTERVAL)
+  {
+    tempLastSample = now;
+    uint32_t ts = now;
+    float t = getInternalTemperature();
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "{%.4f}", t);
+    // mqtt
+    mqtt.publish("temp", (char *)buf, len);
+  }
 }
